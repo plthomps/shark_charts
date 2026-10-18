@@ -10,6 +10,26 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+def check_password():
+    if st.session_state.get("authenticated", False):
+        return True
+
+    st.title("Shark Research Dashboard")
+    password = st.text_input("Enter password", type="password")
+
+    if st.button("Log in"):
+        if password == st.secrets["dashboard_password"]:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password")
+
+    return False
+
+if not check_password():
+    st.stop()
+
+
 st.set_page_config(page_title='Shark Presence | Model Explorer', page_icon='🦈', layout='wide')
 st.title('🦈 Cape Cod Shark Presence — Model Explorer')
 st.caption('Explore held-out model performance, importance, SHAP, and saved one- and two-way PDP figures. No model retraining.')
