@@ -31,6 +31,8 @@ class MultiZip:
 @st.cache_resource(show_spinner=False)
 def open_archives():
     root = Path(__file__).parent / 'results'
+    if not list(root.glob('FORWARD_*.zip')) and not list(root.glob('LOYO_*.zip')):
+        root = Path(__file__).parent  # Also supports ZIPs uploaded to repository root
     result = {}
     for protocol in ('FORWARD', 'LOYO'):
         paths = sorted(root.glob(f'{protocol}_*.zip'))
@@ -97,7 +99,7 @@ with st.sidebar:
     metrics['test_year']=metrics.test_year.astype(int)
     available=metrics[metrics.protocol==protocol]
     group=st.selectbox('Light condition',['ALL','DAWN','DAY','DUSK','NIGHT'])
-    year=st.selectbox('Held-out year',sorted(available[available.group==group].test_year.unique().tolist()),index=None,placeholder='Choose a year')
+    year=st.selectbox('Held-out year',sorted(available[available.group==group].test_year.unique().tolist()),index=0)
 
 metrics['test_year']=metrics.test_year.astype(int)
 st.success(f"Loaded {len(metrics)} models — " + ', '.join(f"{p}: {sum(metrics.protocol==p)}" for p in archives))
@@ -116,17 +118,22 @@ def image_panel(protocol,year,group,filename,caption=None):
 
 tabs=st.tabs(['Overview','Model diagnostics','Feature importance','One-way PDPs','Two-way PDPs','Compare protocols','Interpretation guide'])
 with tabs[0]:
-    st.subheader('Held-out performance across years')
-    m=metrics[metrics.group==group].copy()
-    a,b,c=st.columns(3)
-    a.metric('Models',len(metrics));b.metric('Forward models',sum(metrics.protocol=='FORWARD'));c.metric('LOYO models',sum(metrics.protocol=='LOYO'))
-    measure=st.selectbox('Metric',['auc','ap','balanced_accuracy','recall','specificity','f1','precision','accuracy'],index=0)
-    fig=px.line(m,x='test_year',y=measure,color='protocol',markers=True,title=f'{group}: {measure.upper()} by held-out year')
-    fig.update_yaxes(range=[0,1]);st.plotly_chart(fig,use_container_width=True)
-    pivot=metrics[metrics.protocol==protocol].pivot(index='group',columns='test_year',values=measure)
-    fig=px.imshow(pivot,aspect='auto',color_continuous_scale='Viridis',zmin=0,zmax=1,text_auto='.2f',title=f'{protocol} — {measure.upper()}')
-    st.plotly_chart(fig,use_container_width=True)
-    st.dataframe(metrics.sort_values(['protocol','test_year','group']),use_container_width=True,hide_index=True)
+    st.subheader('Held-out performance — selected model')
+    selected = metrics[(metrics.protocol == protocol) & (metrics.test_year == year) & (metrics.group == group)]
+    if not selected.empty:
+        r = selected.iloc[0]
+        cols = st.columns(4)
+        for col, (field, label) in zip(cols, [('auc','AUC'),('ap','Average precision'),('balanced_accuracy','Balanced accuracy'),('recall','Recall')]):
+            if field in r and pd.notna(r[field]): col.metric(label, f"{float(r[field]):.3f}")
+        st.dataframe(selected.T, use_container_width=True)
+    with st.expander('Compare performance across years and light conditions'):
+        measure=st.selectbox('Metric',['auc','ap','balanced_accuracy','recall','specificity','f1','precision','accuracy'],index=0)
+        m=metrics[(metrics.protocol==protocol)&(metrics.group==group)].copy()
+        fig=px.line(m,x='test_year',y=measure,markers=True,title=f'{protocol} · {group}: {measure.upper()} by held-out year')
+        fig.update_yaxes(range=[0,1]);st.plotly_chart(fig,use_container_width=True)
+        pivot=metrics[metrics.protocol==protocol].pivot(index='group',columns='test_year',values=measure)
+        fig=px.imshow(pivot,aspect='auto',color_continuous_scale='Viridis',zmin=0,zmax=1,text_auto='.2f',title=f'{protocol} — all years and groups')
+        st.plotly_chart(fig,use_container_width=True)
 
 with tabs[1]:
     st.subheader('Saved model diagnostics')
@@ -138,20 +145,28 @@ with tabs[1]:
         if not selected.empty: st.dataframe(selected.T, use_container_width=True)
 
 with tabs[2]:
-    st.subheader('Importance across held-out years')
-    kind=st.selectbox('Importance measure',['gini_importance','permutation_importance','shap_importance'])
+    st.subheader(f'Feature importance — {protocol} · {year} · {group}')
+    kind=st.selectbox('Importance measure',['gini_importance','permutation_importance','shap_importance'],format_func=lambda k: {'gini_importance':'Gini (impurity)','permutation_importance':'Permutation (held-out)','shap_importance':'Mean absolute SHAP'}[k])
     importance=importance_table(kind)
-    part=importance[(importance.protocol==protocol)&(importance.group==group)]
-    if part.empty: st.warning('No importance CSVs available.')
+    part=importance[(importance.protocol==protocol)&(importance.group==group)&(importance.year==year)].copy()
+    if part.empty: st.warning('No importance CSV available for this model.')
     else:
-        ranking=part.groupby('feature').importance.mean().sort_values(ascending=False)
-        top=st.slider('Number of features',5,min(30,len(ranking)),min(15,len(ranking))) if len(ranking)>=5 else len(ranking)
-        chosen=ranking.head(top).index
-        grid=part[part.feature.isin(chosen)].pivot_table(index='feature',columns='year',values='importance').reindex(chosen)
-        fig=px.imshow(grid,aspect='auto',color_continuous_scale='Viridis',title=f'{protocol} · {group} · {kind.replace("_"," ")}')
+        part=part.sort_values('importance',ascending=False)
+        top=st.slider('Number of features',1,len(part),min(15,len(part)))
+        shown=part.head(top).sort_values('importance')
+        fig=px.bar(shown,x='importance',y='feature',orientation='h',title=f'{protocol} · {year} · {group} · {kind.replace("_"," ")}')
+        fig.update_layout(height=max(420,top*30+140),yaxis_title='',xaxis_title='Importance')
         st.plotly_chart(fig,use_container_width=True)
-        st.caption('Gini, held-out permutation, and mean absolute SHAP measure different properties; do not compare their raw scales directly. Negative permutation values may occur.')
-        st.dataframe(grid,use_container_width=True)
+        st.dataframe(part[['feature','importance']],use_container_width=True,hide_index=True)
+        if kind=='shap_importance':
+            st.markdown('#### SHAP summary (beeswarm)')
+            image_panel(protocol,year,group,'shap_summary.png')
+        with st.expander('Compare this importance measure across years'):
+            all_part=importance[(importance.protocol==protocol)&(importance.group==group)]
+            chosen=part.head(top).feature.tolist()
+            grid=all_part[all_part.feature.isin(chosen)].pivot_table(index='feature',columns='year',values='importance').reindex(chosen)
+            st.plotly_chart(px.imshow(grid,aspect='auto',color_continuous_scale='Viridis',title=f'{protocol} · {group} · across years'),use_container_width=True)
+    st.caption('Gini, permutation, and mean absolute SHAP measure different properties; their scales are not directly comparable.')
 
 with tabs[3]:
     st.subheader('One-way partial dependence')
@@ -164,26 +179,21 @@ with tabs[3]:
             image_panel(protocol,int(yr),group,'pdp_1way.png')
 
 with tabs[4]:
-    st.subheader('Two-way PDP contour explorer')
-    st.caption('Axes are environmental predictor values; labeled contour levels are mean model-predicted presence probabilities. A contour crossing 0.50 is not a biological threshold.')
+    st.subheader(f'Two-way PDP contours — {protocol} · {year} · {group}')
+    st.caption('Contours show average model predictions, not observed detection rates or causal effects.')
     z=archives[protocol]
-    pattern=re.compile(rf'^{protocol}/(\d{{4}})_{group}/(pdp2_.*\.png)$')
-    entries=[]
-    for n in z.namelist():
-        m=pattern.match(n)
-        if m: entries.append((int(m.group(1)),m.group(2)))
-    pairs=sorted(set(fn for _,fn in entries))
-    if not pairs: st.warning('No two-way PDP images found.')
+    pattern=re.compile(rf'^{protocol}/{year}_{group}/(pdp2_.*\.png)$')
+    pairs=sorted({m.group(1) for n in z.namelist() if (m:=pattern.match(n))})
+    if not pairs: st.warning('No two-way PDP images found for this selected model.')
     else:
-        selected_pair=st.selectbox('Interaction (two environmental variables)',pairs,format_func=lambda s:s.removeprefix('pdp2_').removesuffix('.png').replace('__',' × '))
-        if year is not None: image_panel(protocol,year,group,selected_pair)
-        st.markdown('#### Compare the same pair across years')
-        comparison_years=st.multiselect('Years',sorted(set(y for y,_ in entries)),default=sorted(set(y for y,_ in entries))[-3:])
-        for yr in comparison_years:
-            if (yr,selected_pair) in entries:
-                st.markdown(f'**{protocol} · {yr} · {group}**')
-                image_panel(protocol,yr,group,selected_pair)
-            else: st.caption(f'{yr}: this interaction was not generated for this model.')
+        selected_pair=st.selectbox('Interaction (two environmental variables)',pairs,format_func=lambda t:t.removeprefix('pdp2_').removesuffix('.png').replace('__',' × '))
+        image_panel(protocol,year,group,selected_pair)
+        with st.expander('Compare the same interaction across years'):
+            pattern_all=re.compile(rf'^{protocol}/(\d{{4}})_{group}/(pdp2_.*\.png)$')
+            entries={(int(m.group(1)),m.group(2)) for n in z.namelist() if (m:=pattern_all.match(n))}
+            years=sorted({yr for yr,fn in entries if fn==selected_pair})
+            comparison_years=st.multiselect('Comparison years',years,default=[])
+            for yr in comparison_years: image_panel(protocol,yr,group,selected_pair)
 
 with tabs[5]:
     st.subheader('FORWARD versus LOYO')
