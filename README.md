@@ -1,4 +1,4 @@
-# Shark Presence Dashboard for Charts and Model Results — GitHub split-ZIP edition
+# Shark Presence Dashboard for Charts and Model Results
 
 Upload `app.py`, `requirements.txt`, and the `results/` directory (containing 15 per-year ZIP archives) to **one GitHub repository**. Deploy `app.py` on Streamlit Community Cloud. The app reads individual ZIPs directly without extracting them.
 
